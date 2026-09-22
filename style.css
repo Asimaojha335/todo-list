@@ -125,3 +125,9 @@ h1 { margin: .15rem 0 0; font-size: 1.9rem; font-weight: 700; letter-spacing: -.
   .filters { justify-content: space-between; }
   .filter { flex: 1; }
 }
+
+/* ---- Backend integration additions ---- */
+.api-note { margin: .35rem 0 0; font-size: .74rem; color: var(--muted); max-width: 26rem; line-height: 1.5; }
+.api-error { margin: .5rem .25rem 0; padding: .6rem .8rem; border-radius: .7rem; background: color-mix(in srgb, var(--high) 12%, transparent); color: var(--high); font-size: .85rem; }
+.task.saving { opacity: .55; pointer-events: none; }
+.btn-add:disabled, .filter:disabled { opacity: .6; cursor: not-allowed; }

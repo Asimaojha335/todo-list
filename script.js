@@ -9,33 +9,45 @@ const count = $("count");
 const clearDone = $("clearDone");
 const searchInput = $("search");
 const formError = $("formError");
+const apiError = $("apiError");
 const filterButtons = document.querySelectorAll(".filter");
 const toast = $("toast");
+const submitBtn = form.querySelector(".btn-add");
 
-const STORAGE_KEY = "todo-tasks-v2";
+const API_URL = "/api/tasks";
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 
-let tasks = load();
+let tasks = [];          // loaded from the server
 let filter = "all";
 let query = "";
-let lastDeleted = null; // { task, index } for undo
+let lastDeleted = null;  // { text, priority, due } for undo (re-created as a new task)
 let toastTimer = null;
 let editingId = null;
+let loaded = false;
 
-function load() {
+async function api(path, options) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options && options.headers) },
+  });
+  let body = null;
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return Array.isArray(parsed) ? parsed : [];
+    body = await res.json();
   } catch {
-    return [];
+    /* no body */
   }
+  if (!res.ok) throw new Error((body && body.error) || `Request failed (${res.status})`);
+  return body;
 }
 
-function save() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks)); } catch { /* storage may be unavailable */ }
+function showApiError(message) {
+  apiError.textContent = message;
+  apiError.hidden = false;
 }
-
-const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+function clearApiError() {
+  apiError.hidden = true;
+  apiError.textContent = "";
+}
 
 function todayString() {
   const d = new Date();
@@ -60,7 +72,6 @@ function visibleTasks() {
   return tasks
     .filter((t) => filter === "all" || (filter === "done" ? t.done : !t.done))
     .filter((t) => !q || t.text.toLowerCase().includes(q))
-    // open tasks first, then by priority, then earliest due date
     .sort((a, b) =>
       Number(a.done) - Number(b.done) ||
       PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] ||
@@ -77,11 +88,7 @@ function renderTask(task) {
   check.className = "check";
   check.checked = task.done;
   check.setAttribute("aria-label", `Mark "${task.text}" as ${task.done ? "not done" : "done"}`);
-  check.addEventListener("change", () => {
-    task.done = check.checked;
-    save();
-    render();
-  });
+  check.addEventListener("change", () => toggleDone(task, check.checked));
 
   const body = document.createElement("div");
   body.className = "body";
@@ -93,15 +100,14 @@ function renderTask(task) {
     edit.value = task.text;
     edit.maxLength = 120;
     edit.setAttribute("aria-label", "Edit task");
-    let finished = false; // Enter/Escape re-render the list, which also fires "blur"; only finish once
+    let finished = false;
     const commit = (keep) => {
       if (finished) return;
       finished = true;
       const value = edit.value.trim();
-      if (keep && value) task.text = value;
       editingId = null;
-      save();
-      render();
+      if (keep && value && value !== task.text) renameTask(task, value);
+      else render();
     };
     edit.addEventListener("keydown", (e) => {
       if (e.key === "Enter") commit(true);
@@ -111,11 +117,11 @@ function renderTask(task) {
     body.appendChild(edit);
     requestAnimationFrame(() => { edit.focus(); edit.select(); });
   } else {
-    const title = document.createElement("span"); // textContent keeps user input safe from HTML injection
+    const title = document.createElement("span");
     title.className = "title";
     title.textContent = task.text;
     title.title = "Double-click to edit";
-    title.addEventListener("dblclick", () => startEdit(task.id));
+    title.addEventListener("dblclick", () => { editingId = task.id; render(); });
     body.appendChild(title);
   }
 
@@ -141,14 +147,14 @@ function renderTask(task) {
   editBtn.setAttribute("aria-label", `Edit "${task.text}"`);
   editBtn.title = "Edit";
   editBtn.textContent = "✎";
-  editBtn.addEventListener("click", () => startEdit(task.id));
+  editBtn.addEventListener("click", () => { editingId = task.id; render(); });
   const del = document.createElement("button");
   del.type = "button";
   del.className = "icon del";
   del.setAttribute("aria-label", `Delete "${task.text}"`);
   del.title = "Delete";
   del.textContent = "×";
-  del.addEventListener("click", () => removeTask(task.id));
+  del.addEventListener("click", () => removeTask(task));
   actions.append(editBtn, del);
 
   li.append(check, body, actions);
@@ -172,8 +178,8 @@ function render() {
   count.textContent = `${left} task${left === 1 ? "" : "s"} left`;
   clearDone.disabled = done === 0;
 
-  empty.hidden = visible.length > 0;
-  if (!visible.length) {
+  empty.hidden = !loaded || visible.length > 0;
+  if (loaded && !visible.length) {
     empty.textContent = !total ? "Nothing here yet. Add your first task above."
       : query ? `No tasks match "${query}".`
       : filter === "done" ? "No completed tasks yet."
@@ -181,20 +187,79 @@ function render() {
   }
 }
 
-/* ---------- actions ---------- */
-function startEdit(id) {
-  editingId = id;
+/* ---------- server-backed actions ---------- */
+async function loadTasks() {
+  try {
+    const data = await api(API_URL);
+    tasks = data.tasks;
+    loaded = true;
+    clearApiError();
+  } catch (err) {
+    showApiError("Could not load tasks. The API or database may be unreachable.");
+    console.error(err);
+  }
   render();
 }
 
-function removeTask(id) {
-  const index = tasks.findIndex((t) => t.id === id);
-  if (index < 0) return;
-  lastDeleted = { task: tasks[index], index };
-  tasks.splice(index, 1);
-  save();
+async function addTask(text, priority, due) {
+  submitBtn.disabled = true;
+  try {
+    const data = await api(API_URL, { method: "POST", body: JSON.stringify({ text, priority, due }) });
+    tasks.unshift(data.task);
+    clearApiError();
+    render();
+  } catch (err) {
+    showApiError("Could not save that task. Please try again.");
+    console.error(err);
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function toggleDone(task, done) {
+  task.done = done; // optimistic
   render();
-  showToast(`Deleted "${lastDeleted.task.text.slice(0, 30)}${lastDeleted.task.text.length > 30 ? "..." : ""}"`);
+  try {
+    await api(`${API_URL}/${task.id}`, { method: "PATCH", body: JSON.stringify({ done }) });
+    clearApiError();
+  } catch (err) {
+    task.done = !done; // revert
+    showApiError("Could not update that task.");
+    render();
+    console.error(err);
+  }
+}
+
+async function renameTask(task, text) {
+  const previous = task.text;
+  task.text = text;
+  render();
+  try {
+    await api(`${API_URL}/${task.id}`, { method: "PATCH", body: JSON.stringify({ text }) });
+    clearApiError();
+  } catch (err) {
+    task.text = previous;
+    showApiError("Could not rename that task.");
+    render();
+    console.error(err);
+  }
+}
+
+async function removeTask(task) {
+  tasks = tasks.filter((t) => t.id !== task.id);
+  lastDeleted = { text: task.text, priority: task.priority, due: task.due };
+  render();
+  try {
+    await api(`${API_URL}/${task.id}`, { method: "DELETE" });
+    clearApiError();
+    showToast(`Deleted "${task.text.slice(0, 30)}${task.text.length > 30 ? "..." : ""}"`);
+  } catch (err) {
+    tasks.push(task);
+    lastDeleted = null;
+    showApiError("Could not delete that task.");
+    render();
+    console.error(err);
+  }
 }
 
 function showToast(message) {
@@ -204,13 +269,12 @@ function showToast(message) {
   toastTimer = setTimeout(() => { toast.hidden = true; lastDeleted = null; }, 5000);
 }
 
-$("undoBtn").addEventListener("click", () => {
+$("undoBtn").addEventListener("click", async () => {
   if (!lastDeleted) return;
-  tasks.splice(Math.min(lastDeleted.index, tasks.length), 0, lastDeleted.task);
+  const { text, priority, due } = lastDeleted;
   lastDeleted = null;
   toast.hidden = true;
-  save();
-  render();
+  await addTask(text, priority, due); // re-creates it as a new task (the old id is gone for good)
 });
 
 form.addEventListener("submit", (event) => {
@@ -222,11 +286,9 @@ form.addEventListener("submit", (event) => {
     return;
   }
   formError.textContent = "";
-  tasks.push({ id: newId(), text, done: false, priority: prioritySelect.value, due: dueInput.value || "" });
+  addTask(text, prioritySelect.value, dueInput.value || "");
   input.value = "";
   dueInput.value = "";
-  save();
-  render();
   input.focus();
 });
 
@@ -245,9 +307,15 @@ searchInput.addEventListener("input", () => {
   render();
 });
 
-clearDone.addEventListener("click", () => {
-  tasks = tasks.filter((t) => !t.done);
-  save();
+clearDone.addEventListener("click", async () => {
+  const done = tasks.filter((t) => t.done);
+  if (!done.length) return;
+  clearDone.disabled = true;
+  const results = await Promise.allSettled(done.map((t) => api(`${API_URL}/${t.id}`, { method: "DELETE" })));
+  const failedIds = new Set(done.filter((_, i) => results[i].status === "rejected").map((t) => t.id));
+  if (failedIds.size) showApiError("Some completed tasks could not be cleared.");
+  else clearApiError();
+  tasks = tasks.filter((t) => !t.done || failedIds.has(t.id));
   render();
 });
 
@@ -258,4 +326,7 @@ $("themeBtn").addEventListener("click", () => {
 });
 
 $("today").textContent = new Date().toLocaleDateString("en-US", { weekday: "long", day: "numeric", month: "long" });
+empty.textContent = "Loading tasks...";
+empty.hidden = false;
 render();
+loadTasks();
